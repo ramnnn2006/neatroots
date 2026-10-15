@@ -24,6 +24,7 @@ export interface SpanInfo {
   toolCalls?: { id?: string; name: string; arguments: Plain }[];
   tools?: string[];
   seq: number;
+  receivedMs: number;
 }
 
 export interface TraceSnapshot {
@@ -95,6 +96,7 @@ export function loadTrace(store: Store, traceId: string): TraceSnapshot {
       toolCalls: v.toolCalls,
       tools: v.tools,
       seq: row.seq,
+      receivedMs: row.received_ms,
     };
     cache.set(row.span_id, info);
     spans.push(info);

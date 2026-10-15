@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Store } from "../src/store/db.js";
 import { loadTrace } from "../src/engine/trace.js";
 import { evaluateRule } from "../src/checks/rules.js";
@@ -10,6 +10,7 @@ import { batch, hex, tmpHome, toolSpan } from "./helpers.js";
 
 const homes: string[] = [];
 afterEach(() => {
+  vi.useRealTimers();
   for (const h of homes.splice(0)) fs.rmSync(h, { recursive: true, force: true });
 });
 
@@ -44,7 +45,7 @@ function run(calls: Call[]) {
     if (c.parallel && i > 0) spans[i].startTimeUnixNano = spans[i - 1].startTimeUnixNano;
   });
   st.ingest([batch(spans)]);
-  return evaluateRule(check, loadTrace(st, t), false);
+  return evaluateRule(check, loadTrace(st, t), true);
 }
 
 describe("requires_before", () => {
@@ -72,7 +73,7 @@ describe("requires_before", () => {
     const lookup = toolSpan(t, root, "lookup_order", "{}", '{"ok":true}');
     lookup.status = { code: 0 };
     st.ingest([batch([lookup, toolSpan(t, root, "issue_refund", "{}", '{"ok":true}')])]);
-    expect(evaluateRule(check, loadTrace(st, t), false)).toBeNull();
+    expect(evaluateRule(check, loadTrace(st, t), true)).toBeNull();
   });
 
   it("fires when the lookup failed", () => {
@@ -93,6 +94,49 @@ describe("requires_before", () => {
 
   it("does not guess when the two calls started together", () => {
     expect(run([{ tool: "lookup_order" }, { tool: "issue_refund", parallel: true }])).toBeNull();
+  });
+
+  it("waits for a lookup that arrives a little after the refund in a live run", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const h = tmpHome();
+    homes.push(h);
+    const st = new Store(path.join(h, "data"));
+    const t = hex(16);
+    const root = hex(8);
+    const lookup = toolSpan(t, root, "lookup_order", "{}", '{"ok":true}');
+    st.ingest([batch([toolSpan(t, root, "issue_refund", "{}", '{"ok":true}')])]);
+    expect(evaluateRule(check, loadTrace(st, t), false)).toBeNull();
+    vi.setSystemTime(Date.now() + 2000);
+    st.ingest([batch([lookup])]);
+    vi.setSystemTime(Date.now() + 5000);
+    expect(evaluateRule(check, loadTrace(st, t), false)).toBeNull();
+  });
+
+  it("fires once the wait is over and clears when the lookup turns up later", () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const h = tmpHome();
+    homes.push(h);
+    const st = new Store(path.join(h, "data"));
+    const t = hex(16);
+    const root = hex(8);
+    const lookup = toolSpan(t, root, "lookup_order", "{}", '{"ok":true}');
+    const refund = toolSpan(t, root, "issue_refund", "{}", '{"ok":true}');
+    st.ingest([batch([refund])]);
+    vi.setSystemTime(Date.now() + 5000);
+    expect(evaluateRule(check, loadTrace(st, t), false)?.firing).toBe(true);
+    vi.setSystemTime(Date.now() + 1000);
+    st.ingest([batch([lookup])]);
+    expect(evaluateRule(check, loadTrace(st, t), false)).toMatchObject({ firing: false, evidenceSpanIds: [refund.spanId] });
+  });
+
+  it("judges a live call straight away when wait_ms is 0", () => {
+    const eager = parseChecks(yaml.replace("lookup_order }", "lookup_order }\n    wait_ms: 0")).checks[0] as RuleCheck;
+    const h = tmpHome();
+    homes.push(h);
+    const st = new Store(path.join(h, "data"));
+    const t = hex(16);
+    st.ingest([batch([toolSpan(t, hex(8), "issue_refund", "{}", '{"ok":true}')])]);
+    expect(evaluateRule(eager, loadTrace(st, t), false)?.firing).toBe(true);
   });
 
   it("labeled smoke: 120 generated runs, every verdict matches the label", () => {

@@ -124,8 +124,16 @@ export function evaluateRule(check: RuleCheck, t: TraceSnapshot, atEnd: boolean)
       if (!guarded.length) return null;
       // Instrumented spans that succeed usually report status unset, so only errors are ruled out.
       const needed = selectSpans(t.spans, { ...r.requires, status: "any" }).filter((s) => s.status !== "error");
-      const missed = guarded.filter((g) => !needed.some((n) => n.id !== g.id && n.startMs <= g.startMs));
-      if (!missed.length) return null;
+      const earlier = (g: SpanInfo) => needed.filter((n) => n.id !== g.id && n.startMs <= g.startMs);
+      // While the run is going, the required span may still be on its way, so a call waits before it is judged.
+      const live = !atEnd && t.run?.status === "running";
+      const settled = live ? guarded.filter((g) => Date.now() - g.receivedMs >= r.wait_ms) : guarded;
+      const missed = settled.filter((g) => !earlier(g).length);
+      if (!missed.length) {
+        // A required span that only turned up after the wait means the call was flagged for a while.
+        const late = settled.filter((g) => earlier(g).every((n) => n.receivedMs - g.receivedMs > r.wait_ms));
+        return late.length ? { firing: false, evidenceSpanIds: late.map((s) => s.id), params: {} } : null;
+      }
       const first = missed[0];
       return {
         firing: true,

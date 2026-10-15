@@ -118,6 +118,8 @@ export const RuleSpec = z.discriminatedUnion("type", [
       span: SpanSelector,
       /** What must have started, and succeeded, before each of them. */
       requires: SpanSelector,
+      /** In a live run, how long a call waits for a late `requires` span before it is judged. */
+      wait_ms: z.number().int().min(0).default(5000),
     })
     .strict(),
   z
